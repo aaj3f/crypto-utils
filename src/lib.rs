@@ -1,41 +1,49 @@
 use base64;
 use bitcoin::consensus::{encode, Encodable};
 use bitcoin::hashes::{sha256d, Hash, HashEngine};
-use bitcoin::network::constants::Network::Bitcoin;
-use bitcoin::util::address::Address;
-use bitcoin::util::misc::{MessageSignature, MessageSignatureError};
-// use bytes::traits::ToBytes;
-use chrono::format::ParseError;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use hex::FromHex;
 use ripemd160::{Digest, Ripemd160};
 use secp256k1::bitcoin_hashes::sha256;
 use secp256k1::key::PublicKey;
 use secp256k1::rand::rngs::OsRng;
-use secp256k1::recovery;
 use secp256k1::{Message, Secp256k1, SecretKey};
-use serde::{Deserialize, Serialize, Serializer};
-use serde_json::{Result, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::{env, fmt, str};
 use unicode_normalization::UnicodeNormalization;
-use url::{ParseError as UrlParseError, Url};
-
-use k256::{
-    ecdsa::{recoverable, signature::Signer, Signature, SigningKey},
-    EncodedPoint,
-};
+use url::Url;
 
 pub const BITCOIN_SIGNED_MSG_PREFIX: &[u8] = b"\x18Bitcoin Signed Message:\n";
 
-// use rand_core::OsRng; // requires 'getrandom' feature
-
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HttpRequest {
-    method: String,
-    headers: Value,
-    body: String,
+    pub method: String,
+    pub headers: Value,
+    pub body: String,
+}
+
+impl fmt::Display for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).unwrap())
+    }
+}
+
+impl HttpRequest {
+    pub fn headers(&self) -> Map<String, Value> {
+        let mut map = Map::new();
+        for (key, value) in self.headers.as_object().unwrap() {
+            map.insert(
+                key.to_string(),
+                serde_json::to_value(value).unwrap_or(Value::default()),
+            )
+            .unwrap_or(Value::default());
+        }
+        map
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,21 +76,12 @@ impl Command {
             .expect("32 bytes, within curve order");
         let recov_sig = secp.sign_recoverable(&sha_hash, &private_key);
         let signature = secp.sign(&sha_hash, &private_key).serialize_der();
-        // let sig_bytes = signature.to_vec();
         let (recovery_id, _sig_bytes) = recov_sig.serialize_compact();
         let recovery_int = recovery_id.to_i32();
-        // let recovery_int = 0;
         let additive_int = 27;
         let recovery_byte = hex::encode(&[u8::try_from(additive_int + recovery_int).unwrap()]);
         let mut sig_string = (recovery_byte).to_string();
-        // sig_string.push_str(&hex::encode(&sig_bytes).to_string());
         sig_string.push_str(&hex::encode(signature.to_vec()));
-        // sig_string.push_str(&hex::encode(
-        //     secp256k1::Signature::from_compact(&sig_bytes)
-        //         .unwrap()
-        //         .serialize_der()
-        //         .to_vec(),
-        // ));
 
         CommandResult {
             cmd: stringified_command,
@@ -99,8 +98,8 @@ impl fmt::Display for Command {
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct CommandResult {
-    cmd: String,
-    sig: String,
+    pub cmd: String,
+    pub sig: String,
 }
 
 impl fmt::Display for CommandResult {
@@ -109,34 +108,24 @@ impl fmt::Display for CommandResult {
     }
 }
 
-fn get_RFC1132_date_time(specific_time: Option<String>) -> String {
-    // let nowDate = new Date()
+fn get_rfc1132_date_time(specific_time: Option<String>) -> String {
     let now = match specific_time {
         Some(string_time) => DateTime::parse_from_rfc2822(&string_time)
             .expect("Could not parse DateTime")
             .with_timezone(&Utc),
         None => Utc::now(),
     };
-    // let weekday = getWeekday(nowDate.getDay());
     let weekday = now.weekday();
-    // let day = formatTwoDigits(nowDate.getDate());
     let day = now.format("%d");
-    // let month = getMonthWord(nowDate.getMonth());
     let month = now.format("%b");
-    // let year = nowDate.getUTCFullYear();
     let (_is_common_era, year) = now.year_ce();
-    // let hours = formatTwoDigits(nowDate.getUTCHours());
     let hours = now.hour();
-    // let minutes = formatTwoDigits(nowDate.getUTCMinutes());
     let minutes = now.minute();
-    // let seconds = formatTwoDigits(nowDate.getUTCSeconds());
     let seconds = now.second();
-    // let result = format!(&weekday, ", ", day, " ", month, " ", year, " ", hours, ": ", minutes, ":", seconds, " GMT");
     let result = format!(
         "{}, {} {} {} {}:{}:{} GMT",
         weekday, day, month, year, hours, minutes, seconds
     );
-    // return weekday + ", " + day + " " + month + " " + year + " " + hours + ":" + minutes + ":" + seconds + " GMT";
     result
 }
 
@@ -150,10 +139,14 @@ pub fn string_to_byte_array(string: &str) -> Vec<u8> {
 
 // pub fn base_ty_byte_array<T>(base_val: impl ToBytes) -> Vec<u8> {}
 
-pub fn generate_key_pair() -> (secp256k1::SecretKey, secp256k1::PublicKey) {
+pub fn generate_key_pair() -> HashMap<String, String> {
     let secp = Secp256k1::new();
     let mut rng = OsRng::new().expect("OsRng");
-    secp.generate_keypair(&mut rng)
+    let (private_key, public_key) = secp.generate_keypair(&mut rng);
+    let mut result = HashMap::new();
+    result.insert(String::from("privateKey"), private_key.to_string());
+    result.insert(String::from("publicKey"), public_key.to_string());
+    result
 }
 
 //take pubkey hex -> pubkey struct -> get prefix & checksum, where prefix is pubkey sha256->ripemd160 concat 15, 2 and where checksum is first 4 bytes of the prefix dub sha hashed. then concat prefix and checksum
@@ -224,13 +217,14 @@ pub fn sign_query(
     db: &str,
     auth: Option<String>,
 ) -> HttpRequest {
+    let _unused_host = host;
     let db: String = String::from(db).to_lowercase();
 
     let test_time = match env::var("TEST_ENV_VAR_TIME") {
         Ok(v) => Some(v),
         Err(_) => None,
     };
-    let formatted_date = get_RFC1132_date_time(test_time);
+    let formatted_date = get_rfc1132_date_time(test_time);
     let byte_command: &[u8] = param.as_bytes();
     let mut hasher = Sha256::new();
     hasher.update(byte_command);
@@ -254,23 +248,13 @@ pub fn sign_query(
     let recovery_byte = hex::encode(&[u8::try_from(additive_int + recovery_int).unwrap()]);
     let mut sig_string = (recovery_byte).to_string();
     sig_string.push_str(&hex::encode(der_sig.to_vec()));
-    // TODO: match auth, if value then return value otherwise return "na"
     let auth_str = match auth {
         Some(str_val) => str_val,
         None => String::from("na"),
     };
 
-    //     var authStr;
-    //     if(auth){
-    //       authStr = auth;
-    //     } else {
-    //       authStr = "na"
-    //     }
-    let signature = format!("keyId=\\\"{}\\\",headers=\\\"(request-target) x-fluree-date digest\\\",algorithm=\\\"ecdsa-sha-256\\\",signature=\\\"{}\\\"", auth_str, sig_string);
-    //     var signature = 'keyId="' + authStr + '",' +
-    //       'headers="(request-target) x-fluree-date digest",' +
-    //       'algorithm="ecdsa-sha256",' +
-    //       'signature="' + sig + '"';
+    let signature = format!("keyId=\\\"{}\\\",headers=\\\"(request-target) x-fluree-date digest\\\",algorithm=\\\"ecdsa-sha256\\\",signature=\\\"{}\\\"", auth_str, sig_string);
+
     let header_string = format!(
         r#"
         {{
@@ -283,24 +267,11 @@ pub fn sign_query(
     );
     let headers = serde_json::from_str(&header_string).expect("Could not serialize into JSON");
 
-    // var headers =  {
-    //   "Content-Type": "application/json",
-    //   "X-Fluree-Date": formattedDate,
-    //   "Digest": "SHA-256=" + digest,
-    //   "Signature": signature
-    // }
     HttpRequest {
         method: String::from("POST"),
         headers,
         body: String::from(param),
     }
-    //     return {
-    //       method: "POST",
-    //       headers: headers,
-    //       body: param
-    //     };
-
-    // }
 }
 pub fn sign_request(
     method: &str,
@@ -309,27 +280,21 @@ pub fn sign_request(
     private_key: &str,
     auth: Option<String>,
 ) -> HttpRequest {
-    //     function signRequest( method, url, body, privateKey, auth ){
-
     let uri_parts = Url::parse(url).expect("URL string was malformed");
     println!("The path part of the URL is: {}", uri_parts.path());
     let test_time = match env::var("TEST_ENV_VAR_TIME") {
         Ok(v) => Some(v),
         Err(_) => None,
     };
-    let formatted_date = get_RFC1132_date_time(test_time);
+    let formatted_date = get_rfc1132_date_time(test_time);
     println!("formatted_date: {:?}", formatted_date);
-    //   var uriParts = parseURL(url);
-    //   var formattedDate = getRFC1123DateTime();
-    //   var digest = crypto.sha2_256_normalize(body, "base64");
+
     let byte_command: &[u8] = body.as_bytes();
     let mut hasher = Sha256::new();
     hasher.update(byte_command);
     let sha_digest = hasher.finalize();
     let digest = base64::encode(&sha_digest);
-    //   var signingString = "(request-target): post " + uriParts[4] +
-    //     "\nx-fluree-date: " + formattedDate +
-    //     "\ndigest: SHA-256=" + digest;
+
     let signing_string = format!(
         "(request-target): post {}\nx-fluree-date: {}\ndigest: SHA-256={:?}",
         uri_parts.path(),
@@ -354,25 +319,8 @@ pub fn sign_request(
         None => String::from("na"),
     };
 
-    //   var sig = signCommand(signingString, privateKey);
-    //   var authStr;
-    //   if(auth){
-    //     authStr = auth;
-    //   } else {
-    //     authStr = "na"
-    //   }
-    //   var signature = 'keyId="' + authStr + '",' +
-    //     'headers="(request-target) x-fluree-date digest",' +
-    //     'algorithm="ecdsa-sha256",' +
-    //     'signature="' + sig + '"';
-    let signature = format!("keyId=\\\"{}\\\",headers=\\\"(request-target) x-fluree-date digest\\\",algorithm=\\\"ecdsa-sha-256\\\",signature=\\\"{}\\\"", auth_str, sig_string);
+    let signature = format!("keyId=\\\"{}\\\",headers=\\\"(request-target) x-fluree-date digest\\\",algorithm=\\\"ecdsa-sha256\\\",signature=\\\"{}\\\"", auth_str, sig_string);
 
-    //   var headers =  {
-    //     "Content-Type": "application/json",
-    //     "X-Fluree-Date": formattedDate,
-    //     "Digest": "SHA-256=" + digest,
-    //     "Signature": signature
-    //   }
     let headers: Value = serde_json::from_str(&format!(
         r#"
         {{
@@ -389,14 +337,6 @@ pub fn sign_request(
         headers,
         body: String::from(body),
     }
-
-    //   return {
-    //     method: method,
-    //     headers: headers,
-    //     body: body
-    //   };
-
-    // }
 }
 
 pub fn signed_msg_hash(msg: &str) -> sha256d::Hash {
@@ -424,9 +364,12 @@ mod tests {
     #[test]
     fn can_generate_key_pair() {
         let secp = Secp256k1::new();
-        let (secret_key, public_key) = generate_key_pair();
+        let keypair = generate_key_pair();
+        let private_key_string = keypair.get("privateKey").unwrap();
         let message = Message::from_hashed_data::<sha256::Hash>("Hello World!".as_bytes());
-
+        let secret_key =
+            SecretKey::from_slice(&hex::decode(private_key_string.as_bytes()).unwrap()).unwrap();
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
         let sig = secp.sign(&message, &secret_key);
         println!("Secret Key: {:?}", secret_key);
         assert!(secp.verify(&message, &sig, &public_key).is_ok());
@@ -609,7 +552,7 @@ mod tests {
             "Content-Type": "appication/json",
             "X-Fluree-Date": "Sun, 09 May 2021 13:25:49 GMT",
             "Digest": "SHA-256=tqhS85d05mvYlGgSR6VE6W09gCOt8tb4sWOcypKp8PM=",
-            "Signature": "keyId=\"na\",headers=\"(request-target) x-fluree-date digest\",algorithm=\"ecdsa-sha-256\",signature=\"1c304402207b7180f3dc530be6fe77dcfd5f7254f6ae37a461000b9878a54845e3ba41a18a02206abb3ab24ec85656a271faa2e951296a55aa63810920a205f87d18f6c3c8bf5a\""
+            "Signature": "keyId=\"na\",headers=\"(request-target) x-fluree-date digest\",algorithm=\"ecdsa-sha256\",signature=\"1c304402207b7180f3dc530be6fe77dcfd5f7254f6ae37a461000b9878a54845e3ba41a18a02206abb3ab24ec85656a271faa2e951296a55aa63810920a205f87d18f6c3c8bf5a\""
 
         }"#;
         env::set_var("TEST_ENV_VAR_TIME", "Sun, 09 May 2021 13:25:49 GMT");
@@ -630,7 +573,7 @@ mod tests {
         // let auth = Some(String::from("Tf33mCxFory8fWb55DkGv3nZ4ytCsy11fjW"));
         let auth = None;
         let signed_request = sign_query(private_key, param, query_type, host, db, auth);
-        // println!("EXPECTED_REQUEST = {:?}", expected_request);
+        println!("EXPECTED_REQUEST = {:?}", signed_request.headers);
         assert_eq!(signed_request.body, expected_request.body);
         assert_eq!(signed_request.method, expected_request.method);
         assert_eq!(signed_request.headers, expected_request.headers);
@@ -661,11 +604,11 @@ mod tests {
         let string_headers = r#"
         {
             "Content-Type": "appication/json",
-            "X-Fluree-Date": "Sun, 09 May 2021 13:58:08 GMT",
+            "X-Fluree-Date": "Sun, 09 May 2021 13:25:49 GMT",
             "Digest": "SHA-256=tqhS85d05mvYlGgSR6VE6W09gCOt8tb4sWOcypKp8PM=",
-            "Signature": "keyId=\"na\",headers=\"(request-target) x-fluree-date digest\",algorithm=\"ecdsa-sha-256\",signature=\"1b3045022100cbd32e463567fefc2f120425b0224d9d263008911653f50e83953f47cfbef3bc0220689d3a7266a1b425540d6ae61e7477d6bbc911da600017961134a97d5fc16b7f\""
+            "Signature": "keyId=\"na\",headers=\"(request-target) x-fluree-date digest\",algorithm=\"ecdsa-sha256\",signature=\"1b304502210096889515c74fad981f9e38907c400a56b7e70d4bfbcddc1723d06ef2190384f702202c93ca84a77da02858fe451ab07cd73cbccd9aedaa3fb25f98f459040503a58c\""
         }"#;
-        env::set_var("TEST_ENV_VAR_TIME", "Sun, 09 May 2021 13:58:08 GMT");
+        env::set_var("TEST_ENV_VAR_TIME", "Sun, 09 May 2021 13:25:49 GMT");
         let headers = serde_json::from_str(string_headers).expect("Could not serialize into JSON");
         let expected_request = HttpRequest {
             method: String::from("POST"),
